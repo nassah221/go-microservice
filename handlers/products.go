@@ -71,6 +71,7 @@ func (p *Products) getProducts(rw http.ResponseWriter, r *http.Request) {
 	err := lp.ToJSON(rw)
 	if err != nil {
 		http.Error(rw, "Unable to marshal json", http.StatusInternalServerError)
+		return
 	}
 }
 
