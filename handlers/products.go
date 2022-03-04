@@ -1,67 +1,29 @@
 package handlers
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net/http"
-	"regexp"
 	"strconv"
 
 	"github.com/go-microservice/data"
+	"github.com/gorilla/mux"
 )
 
 type Products struct {
 	l *log.Logger
 }
 
+type KeyProduct struct{}
+
 // NewProducts creates a products handler with the given logger
 func NewProducts(l *log.Logger) *Products {
 	return &Products{l}
 }
 
-// ServeHTTP is the main entry point for the handler and staisfies the http.Handler
-// interface
-func (p *Products) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
-	// handle the request for a list of products
-	if r.Method == http.MethodGet {
-		p.getProducts(rw, r)
-		return
-	}
-
-	if r.Method == http.MethodPost {
-		p.addProduct(rw, r)
-		return
-	}
-
-	if r.Method == http.MethodPut {
-		reg := regexp.MustCompile(`/(\d+)`)
-		g := reg.FindAllStringSubmatch(r.URL.Path, -1)
-
-		if len(g) != 1 {
-			http.Error(rw, "Invalid URI", http.StatusBadRequest)
-			return
-		}
-		if len(g[0]) != 2 {
-			http.Error(rw, "Invalid URI", http.StatusBadRequest)
-			return
-		}
-
-		idString := g[0][1]
-		id, err := strconv.Atoi(idString)
-		if err != nil {
-			http.Error(rw, "Invalid ID", http.StatusBadRequest)
-			return
-		}
-
-		p.updateProduct(id, rw, r)
-	}
-
-	// catch all
-	// if no method is satisfied return an error
-	rw.WriteHeader(http.StatusMethodNotAllowed)
-}
-
 // getProducts returns the products from the data store
-func (p *Products) getProducts(rw http.ResponseWriter, r *http.Request) {
+func (p *Products) GetProducts(rw http.ResponseWriter, r *http.Request) {
 	p.l.Println("Handle GET Products")
 
 	// fetch the products from the datastore
@@ -71,26 +33,37 @@ func (p *Products) getProducts(rw http.ResponseWriter, r *http.Request) {
 	err := lp.ToJSON(rw)
 	if err != nil {
 		http.Error(rw, "Unable to marshal json", http.StatusInternalServerError)
+		return
 	}
 }
 
-func (p *Products) addProduct(rw http.ResponseWriter, r *http.Request) {
+func (p *Products) AddProduct(rw http.ResponseWriter, r *http.Request) {
 	p.l.Println("Handle POST Products")
 
-	var prod data.Product
-	if err := prod.FromJSON(r.Body); err != nil {
-		http.Error(rw, "Unable to decode json", http.StatusInternalServerError)
+	v := r.Context().Value(KeyProduct{})
+	prod, ok := v.(data.Product)
+	if !ok {
+		http.Error(rw, "Unable cast request context into product", http.StatusInternalServerError)
+		return
 	}
 
 	data.AddProduct(&prod)
 }
 
-func (p *Products) updateProduct(id int, rw http.ResponseWriter, r *http.Request) {
+func (p *Products) UpdateProduct(rw http.ResponseWriter, r *http.Request) {
 	p.l.Println("Handle PUT Products")
 
-	var prod data.Product
-	if err := prod.FromJSON(r.Body); err != nil {
-		http.Error(rw, "Unable to decode json", http.StatusInternalServerError)
+	vars := mux.Vars(r)
+	id, err := strconv.Atoi(vars["id"])
+	if err != nil {
+		http.Error(rw, "Cannot parse id from URL Path", http.StatusBadRequest)
+		return
+	}
+
+	v := r.Context().Value(KeyProduct{})
+	prod, ok := v.(data.Product)
+	if !ok {
+		http.Error(rw, "Unable cast request context into product", http.StatusInternalServerError)
 		return
 	}
 
@@ -103,4 +76,32 @@ func (p *Products) updateProduct(id int, rw http.ResponseWriter, r *http.Request
 		http.Error(rw, "Product id not found", http.StatusInternalServerError)
 		return
 	}
+}
+
+func (p Products) MiddlewareProductValidation(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		var prod data.Product
+
+		if err := prod.FromJSON(r.Body); err != nil {
+			p.l.Println(err)
+			http.Error(rw, "Unable to encode JSON", http.StatusBadRequest)
+			return
+		}
+
+		if err := prod.Validate(); err != nil {
+			if err == data.ErrRegisterValidation {
+				p.l.Println("[ERROR] Registering custom validator")
+				http.Error(rw, "", http.StatusInternalServerError)
+				return
+			}
+			p.l.Println("[ERROR] validating product")
+			http.Error(rw, fmt.Sprintf("Error validating payload: %s", err), http.StatusBadRequest)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), KeyProduct{}, prod)
+		req := r.WithContext(ctx)
+
+		next.ServeHTTP(rw, req)
+	})
 }
