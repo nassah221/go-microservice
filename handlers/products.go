@@ -1,81 +1,47 @@
+// Package classification of Product API
+//
+// Documentation for Product API
+//
+//	Schemes: http
+//	BasePath: /
+//	Version: 1.0.0
+//
+//	Consumes:
+//	- application/json
+//
+//	Produces:
+//	- application/json
+//
+// swagger:meta
+
 package handlers
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 
 	"github.com/go-microservice/data"
-	"github.com/gorilla/mux"
 )
 
 type Products struct {
 	l *log.Logger
+	v *data.Validation
 }
 
 type KeyProduct struct{}
 
 // NewProducts creates a products handler with the given logger
-func NewProducts(l *log.Logger) *Products {
-	return &Products{l}
+func NewProducts(l *log.Logger, v *data.Validation) *Products {
+	return &Products{l, v}
 }
 
-// getProducts returns the products from the data store
-func (p *Products) GetProducts(rw http.ResponseWriter, r *http.Request) {
-	p.l.Println("Handle GET Products")
-
-	// fetch the products from the datastore
-	lp := data.GetProducts()
-
-	// serialize the list to JSON
-	err := lp.ToJSON(rw)
-	if err != nil {
-		http.Error(rw, "Unable to marshal json", http.StatusInternalServerError)
-		return
-	}
+type GenericError struct {
+	Message string `json:"message"`
 }
 
-func (p *Products) AddProduct(rw http.ResponseWriter, r *http.Request) {
-	p.l.Println("Handle POST Products")
-
-	v := r.Context().Value(KeyProduct{})
-	prod, ok := v.(data.Product)
-	if !ok {
-		http.Error(rw, "Unable cast request context into product", http.StatusInternalServerError)
-		return
-	}
-
-	data.AddProduct(&prod)
-}
-
-func (p *Products) UpdateProduct(rw http.ResponseWriter, r *http.Request) {
-	p.l.Println("Handle PUT Products")
-
-	vars := mux.Vars(r)
-	id, err := strconv.Atoi(vars["id"])
-	if err != nil {
-		http.Error(rw, "Cannot parse id from URL Path", http.StatusBadRequest)
-		return
-	}
-
-	v := r.Context().Value(KeyProduct{})
-	prod, ok := v.(data.Product)
-	if !ok {
-		http.Error(rw, "Unable cast request context into product", http.StatusInternalServerError)
-		return
-	}
-
-	if err := data.UpdateProduct(id, &prod); err != nil {
-		if err == data.ErrProductNotFound {
-			http.Error(rw, "Product id not found", http.StatusNotFound)
-			return
-		}
-
-		http.Error(rw, "Product id not found", http.StatusInternalServerError)
-		return
-	}
+type ValidationError struct {
+	Messages []string `json:"messages"`
 }
 
 func (p Products) MiddlewareProductValidation(next http.Handler) http.Handler {
@@ -83,19 +49,18 @@ func (p Products) MiddlewareProductValidation(next http.Handler) http.Handler {
 		var prod data.Product
 
 		if err := prod.FromJSON(r.Body); err != nil {
-			p.l.Println(err)
-			http.Error(rw, "Unable to encode JSON", http.StatusBadRequest)
+			p.l.Printf("[ERROR] deserialzing product: %v", err)
+
+			rw.WriteHeader(http.StatusBadRequest)
+			data.ToJSON(&GenericError{Message: err.Error()}, rw)
 			return
 		}
 
-		if err := prod.Validate(); err != nil {
-			if err == data.ErrRegisterValidation {
-				p.l.Println("[ERROR] Registering custom validator")
-				http.Error(rw, "", http.StatusInternalServerError)
-				return
-			}
+		if errs := p.v.Validate(prod); len(errs) != 0 {
 			p.l.Println("[ERROR] validating product")
-			http.Error(rw, fmt.Sprintf("Error validating payload: %s", err), http.StatusBadRequest)
+
+			rw.WriteHeader(http.StatusUnprocessableEntity)
+			data.ToJSON(&ValidationError{Messages: errs.Errors()}, rw)
 			return
 		}
 
